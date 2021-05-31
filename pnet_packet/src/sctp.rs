@@ -449,11 +449,10 @@ fn sctp_chunk_init_ack() {
     let chunk = &chunks[0];
     /* check on INIT ACK chunk */
     assert!(chunk.get_type_() == SctpChunkTypes::INIT_ACK);
-    let chunk = match chunk {
-        SctpChunk::InitAck(p) => p,
-        _ => {
-            panic!("Not a INIT ACK packet");
-        }
+    let chunk = if let SctpChunk::InitAck(p) = chunk {
+        p
+    } else {
+        panic!("Not a INIT ACK packet");
     };
     assert!(chunk.get_flags() == 0xab);
     assert!(chunk.get_length() == 40);
@@ -465,20 +464,18 @@ fn sctp_chunk_init_ack() {
     let options = chunk.get_options();
     assert!(options.len() == 2);
     /* check IPv4 Option */
-    let option_ipv4 = match &options[0] {
-        SctpChunkOption::Ipv4Addr(o) => o,
-        _ => {
-            panic!("Not an \"IPv4 address\" option");
-        }
+    let option_ipv4 = if let SctpChunkOption::Ipv4Addr(o) = &options[0] {
+        o
+    } else {
+        panic!("Not an \"IPv4 address\" option");
     };
     assert!(option_ipv4.get_length() == 2 + 2 + 4);
     assert!(option_ipv4.get_addr() == Ipv4Addr::new(127, 0, 0, 1));
     /* check State Cookie option */
-    let option_state_cookie = match &options[1] {
-        SctpChunkOption::StateCookie(o) => o,
-        _ => {
-            panic!("Not a \"State Cookie\" option");
-        }
+    let option_state_cookie = if let SctpChunkOption::StateCookie(o) = &options[1] {
+        o
+    } else {
+        panic!("Not a \"State Cookie\" option");
     };
     assert!(option_state_cookie.get_length() == 2 + 2 + 6);
     assert!(option_state_cookie.payload() == b"c00ki3".to_vec());
