@@ -26,6 +26,13 @@ impl SctpPacket<'_> {
         crc32::checksum_castagnoli(self.packet())
     }
 
+    pub fn iter_chunks<'a>(&'a self) -> SctpChunkIterator<'a> {
+        SctpChunkIterator {
+            sctp_payload: &self.payload(),
+            offset: 0,
+        }
+    }
+
     pub fn get_chunks(&self) -> Vec<SctpChunk> {
         let mut i = 0;
         let mut chunks = Vec::<SctpChunk>::new();
@@ -46,6 +53,30 @@ impl SctpPacket<'_> {
             chunks.push(chunk);
         }
         chunks
+    }
+}
+
+pub struct SctpChunkIterator<'a> {
+    sctp_payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Iterator for SctpChunkIterator<'a> {
+    type Item = SctpChunk<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset >= self.sctp_payload.len() {
+            return None;
+        }
+        let start = self.offset;
+        let chunk = SctpChunkGenericPacket::new(self.sctp_payload).unwrap();
+        self.offset += chunk.get_length() as usize;
+        let data = &self.sctp_payload[start..self.offset];
+        match chunk.get_type_() {
+            SctpChunkTypes::INIT => SctpChunkInitPacket::new(data).map(SctpChunk::Init),
+            SctpChunkTypes::INIT_ACK => SctpChunkInitAckPacket::new(data).map(SctpChunk::InitAck),
+            _ => SctpChunkGenericPacket::new(data).map(SctpChunk::Generic),
+        }
     }
 }
 
@@ -128,6 +159,7 @@ pub struct SctpChunkInitAck {
     pub payload: Vec<u8>,
 }
 
+#[derive(Debug)]
 pub enum SctpChunk<'a> {
     Generic(SctpChunkGenericPacket<'a>),
     Init(SctpChunkInitPacket<'a>),
@@ -479,4 +511,16 @@ fn sctp_chunk_init_ack() {
     };
     assert!(option_state_cookie.get_length() == 2 + 2 + 6);
     assert!(option_state_cookie.payload() == b"c00ki3".to_vec());
+}
+
+#[test]
+fn sctp_packet_iter() {
+    let data: &[u8] = b"\x0b\x59\x0b\x59\x00\x00\x0e\x50\x53\xc3\x05\x5f\x04\x00\x00\x18\x00\x01\x00\x14\x40\xe4\x4b\x92\x0a\x1c\x06\x2c\x1b\x66\xaf\x7e\x00\x00\x00\x00";
+
+    let pkt = SctpPacket::new(&data).unwrap();
+    let chunks: Vec<_> = pkt.iter_chunks().collect();
+    assert_eq!(chunks.len(), 1);
+    let chunk0 = &chunks[0];
+    assert_eq!(chunk0.get_type_(), SctpChunkTypes::HEARTBEAT);
+    assert_eq!(chunk0.get_payload().len(), 20);
 }
