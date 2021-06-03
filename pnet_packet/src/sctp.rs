@@ -37,17 +37,21 @@ impl SctpPacket<'_> {
         let mut i = 0;
         let mut chunks = Vec::<SctpChunk>::new();
         while i < self.payload().len() {
-            let chunk = SctpChunkGenericPacket::new(&self.payload()[i..]).expect("Error creating a SctpChunkGenericPacket");
+            let chunk = SctpChunkGenericPacket::new(&self.payload()[i..])
+                .expect("Error creating a SctpChunkGenericPacket");
             i += chunk.get_length() as usize;
             let chunk = match chunk.get_type_() {
                 SctpChunkTypes::INIT => SctpChunk::Init(
-                    SctpChunkInitPacket::owned(chunk.packet().clone().to_vec()).expect("Error creating a SctpChunkInitPacket"),
+                    SctpChunkInitPacket::owned(chunk.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkInitPacket"),
                 ),
                 SctpChunkTypes::INIT_ACK => SctpChunk::InitAck(
-                    SctpChunkInitAckPacket::owned(chunk.packet().clone().to_vec()).expect("Error creating a SctpChunkInitAckPacket"),
+                    SctpChunkInitAckPacket::owned(chunk.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkInitAckPacket"),
                 ),
                 _ => SctpChunk::Generic(
-                    SctpChunkGenericPacket::owned(chunk.packet().clone().to_vec()).expect("SctpChunkGenericPacket"),
+                    SctpChunkGenericPacket::owned(chunk.packet().clone().to_vec())
+                        .expect("SctpChunkGenericPacket"),
                 ),
             };
             chunks.push(chunk);
@@ -166,7 +170,32 @@ pub enum SctpChunk<'a> {
     InitAck(SctpChunkInitAckPacket<'a>),
 }
 
-impl SctpChunk<'_> {
+impl<'p> SctpChunk<'_> {
+    pub fn new(packet: &'p [u8]) -> Option<SctpChunk<'p>> {
+        let gen = if let Some(x) = SctpChunkGenericPacket::new(packet) {
+            x
+        } else {
+            return None;
+        };
+        Some(match gen.get_type_() {
+            SctpChunkTypes::INIT => {
+                SctpChunk::Init(if let Some(x) = SctpChunkInitPacket::new(packet) {
+                    x
+                } else {
+                    return None;
+                })
+            }
+            SctpChunkTypes::INIT_ACK => {
+                SctpChunk::InitAck(if let Some(x) = SctpChunkInitAckPacket::new(packet) {
+                    x
+                } else {
+                    return None;
+                })
+            }
+            _ => SctpChunk::Generic(gen),
+        })
+    }
+
     /* generic method to get payload from any type of chunk */
     pub fn get_payload(&self) -> &[u8] {
         match self {
@@ -181,6 +210,59 @@ impl SctpChunk<'_> {
             SctpChunk::Generic(p) => p.get_type_(),
             SctpChunk::Init(p) => p.get_type_(),
             SctpChunk::InitAck(p) => p.get_type_(),
+        }
+    }
+
+    pub fn iter_options<'a>(&'a self) -> SctpChunkOptionIterator<'a> {
+        SctpChunkOptionIterator {
+            sctp_chunk_payload: &self.get_payload(),
+            offset: 0,
+        }
+    }
+}
+
+pub struct SctpChunkOptionIterator<'a> {
+    sctp_chunk_payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Iterator for SctpChunkOptionIterator<'a> {
+    type Item = SctpChunkOption<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset >= self.sctp_chunk_payload.len() {
+            return None;
+        }
+        let start = self.offset;
+        let option = SctpChunkOptionGenericPacket::new(&self.sctp_chunk_payload[start..]).unwrap();
+        self.offset += option.get_length() as usize;
+        dbg!("{:?}", &option);
+        dbg!("{:?}", option.get_length());
+        dbg!("{:?}", self.offset);
+        let data = &self.sctp_chunk_payload[start..self.offset];
+        /* RFC 4960
+         * The total length of a parameter (including Type, Parameter Length,
+         * and Value fields) MUST be a multiple of 4 bytes.  If the length of
+         * the parameter is not a multiple of 4 bytes, the sender pads the
+         * parameter at the end (i.e., after the Parameter Value field) with
+         * all zero bytes.  The length of the padding is not included in the
+         * Parameter Length field.  A sender MUST NOT pad with more than 3
+         * bytes.  The receiver MUST ignore the padding bytes.
+         */
+        while self.offset % 4 != 0 {
+            self.offset += 1;
+        }
+        match option.get_type_() {
+            SctpChunkOptionTypes::IPV4_ADDR => {
+                SctpChunkOptionIpv4AddrPacket::new(data).map(SctpChunkOption::Ipv4Addr)
+            }
+            SctpChunkOptionTypes::IPV6_ADDR => {
+                SctpChunkOptionIpv6AddrPacket::new(data).map(SctpChunkOption::Ipv6Addr)
+            }
+            SctpChunkOptionTypes::STATE_COOKIE => {
+                SctpChunkOptionGenericPacket::new(data).map(SctpChunkOption::StateCookie)
+            }
+            _ => SctpChunkOptionGenericPacket::new(data).map(SctpChunkOption::Generic),
         }
     }
 }
@@ -259,6 +341,19 @@ pub enum SctpChunkOption<'a> {
     HostnameAddr(SctpChunkOptionGenericPacket<'a>),
 }
 
+impl SctpChunkOption<'_> {
+    pub fn get_type_(&self) -> SctpChunkOptionType {
+        match self {
+            SctpChunkOption::Generic(p) => p.get_type_(),
+            SctpChunkOption::Ipv4Addr(p) => p.get_type_(),
+            SctpChunkOption::Ipv6Addr(p) => p.get_type_(),
+            SctpChunkOption::StateCookie(p) => p.get_type_(),
+            SctpChunkOption::UnrecognizedParameter(p) => p.get_type_(),
+            SctpChunkOption::HostnameAddr(p) => p.get_type_(),
+        }
+    }
+}
+
 fn sctp_chunk_option_length(option: &SctpChunkOptionGenericPacket) -> usize {
     (option.get_length() - 4) as usize
 }
@@ -268,7 +363,8 @@ impl SctpChunkInitPacket<'_> {
         let mut i = 0;
         let mut options = Vec::<SctpChunkOption>::new();
         while i < self.payload().len() {
-            let option = SctpChunkOptionGenericPacket::new(&self.payload()[i..]).expect("Error creating a SctpChunkOptionGenericPacket");
+            let option = SctpChunkOptionGenericPacket::new(&self.payload()[i..])
+                .expect("Error creating a SctpChunkOptionGenericPacket");
             i += option.get_length() as usize;
             options.push(match option.get_type_() {
                 /* XXX TODO */
@@ -278,16 +374,20 @@ impl SctpChunkInitPacket<'_> {
                  *
                  */
                 SctpChunkOptionTypes::IPV4_ADDR => SctpChunkOption::Ipv4Addr(
-                    SctpChunkOptionIpv4AddrPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionIpv4AddrPacket"),
+                    SctpChunkOptionIpv4AddrPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionIpv4AddrPacket"),
                 ),
                 SctpChunkOptionTypes::IPV6_ADDR => SctpChunkOption::Ipv6Addr(
-                    SctpChunkOptionIpv6AddrPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionIpv6AddrPacket"),
+                    SctpChunkOptionIpv6AddrPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionIpv6AddrPacket"),
                 ),
                 SctpChunkOptionTypes::HOSTNAME_ADDR => SctpChunkOption::HostnameAddr(
-                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionGenericPacket"),
+                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionGenericPacket"),
                 ),
                 _ => SctpChunkOption::Generic(
-                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionGenericPacket"),
+                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionGenericPacket"),
                 ),
             });
             /* RFC 4960
@@ -312,7 +412,8 @@ impl SctpChunkInitAckPacket<'_> {
         let mut i = 0;
         let mut options = Vec::<SctpChunkOption>::new();
         while i < self.payload().len() {
-            let option = SctpChunkOptionGenericPacket::new(&self.payload()[i..]).expect("Error creating a SctpChunkOptionGenericPacket");
+            let option = SctpChunkOptionGenericPacket::new(&self.payload()[i..])
+                .expect("Error creating a SctpChunkOptionGenericPacket");
             i += option.get_length() as usize;
             options.push(match option.get_type_() {
                 /* XXX TODO */
@@ -321,13 +422,16 @@ impl SctpChunkInitAckPacket<'_> {
                  *
                  */
                 SctpChunkOptionTypes::IPV4_ADDR => SctpChunkOption::Ipv4Addr(
-                    SctpChunkOptionIpv4AddrPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionIpv4AddrPacket"),
+                    SctpChunkOptionIpv4AddrPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionIpv4AddrPacket"),
                 ),
                 SctpChunkOptionTypes::IPV6_ADDR => SctpChunkOption::Ipv6Addr(
-                    SctpChunkOptionIpv6AddrPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionIpv6AddrPacket"),
+                    SctpChunkOptionIpv6AddrPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionIpv6AddrPacket"),
                 ),
                 SctpChunkOptionTypes::STATE_COOKIE => SctpChunkOption::StateCookie(
-                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionGenericPacket"),
+                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionGenericPacket"),
                 ),
                 SctpChunkOptionTypes::UNRECOGNIZED_PARAMETER => {
                     SctpChunkOption::UnrecognizedParameter(
@@ -336,10 +440,12 @@ impl SctpChunkInitAckPacket<'_> {
                     )
                 }
                 SctpChunkOptionTypes::HOSTNAME_ADDR => SctpChunkOption::HostnameAddr(
-                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionGenericPacket"),
+                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionGenericPacket"),
                 ),
                 _ => SctpChunkOption::Generic(
-                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec()).expect("Error creating a SctpChunkOptionGenericPacket"),
+                    SctpChunkOptionGenericPacket::owned(option.packet().clone().to_vec())
+                        .expect("Error creating a SctpChunkOptionGenericPacket"),
                 ),
             });
             /* RFC 4960
@@ -476,24 +582,57 @@ fn sctp_chunk_init_ack() {
     assert!(pkt.get_destination() == 54321);
     assert!(pkt.get_tag() == 0xccddeeff);
     assert!(pkt.get_checksum() == 0x4b77e61e);
-    let chunks = pkt.get_chunks();
-    assert!(chunks.len() == 1);
-    let chunk = &chunks[0];
+    let mut iter = pkt.iter_chunks();
+    let chunk = iter
+        .next()
+        .expect("Expected at least one chunk - found none");
+    assert!(iter.next().is_none());
     /* check on INIT ACK chunk */
     assert!(chunk.get_type_() == SctpChunkTypes::INIT_ACK);
-    let chunk = if let SctpChunk::InitAck(p) = chunk {
+    let chunk_init_ack = if let SctpChunk::InitAck(ref p) = chunk {
         p
     } else {
         panic!("Not a INIT ACK packet");
     };
-    assert!(chunk.get_flags() == 0xab);
-    assert!(chunk.get_length() == 40);
-    assert!(chunk.get_init_tag() == 0x04030201);
-    assert!(chunk.get_a_rwnd() == 65000);
-    assert!(chunk.get_n_out_streams() == 17536);
-    assert!(chunk.get_n_in_streams() == 63571);
-    assert!(chunk.get_init_tsn() == 13);
-    let options = chunk.get_options();
+    assert!(chunk_init_ack.get_flags() == 0xab);
+    assert!(chunk_init_ack.get_length() == 40);
+    assert!(chunk_init_ack.get_init_tag() == 0x04030201);
+    assert!(chunk_init_ack.get_a_rwnd() == 65000);
+    assert!(chunk_init_ack.get_n_out_streams() == 17536);
+    assert!(chunk_init_ack.get_n_in_streams() == 63571);
+    assert!(chunk_init_ack.get_init_tsn() == 13);
+    for (i, option) in chunk.iter_options().enumerate() {
+        if i == 0 {
+            dbg!("ALLLOOOOO");
+            /* check IPv4 Option */
+            let option_ipv4 = if let SctpChunkOption::Ipv4Addr(o) = option {
+                o
+            } else {
+                panic!("Not an \"IPv4 address\" option");
+            };
+            assert!(option_ipv4.get_length() == 2 + 2 + 4);
+            assert!(option_ipv4.get_addr() == Ipv4Addr::new(127, 0, 0, 1));
+        } else if i == 1 {
+            /* check State Cookie option */
+            let option_state_cookie = if let SctpChunkOption::StateCookie(o) = option {
+                o
+            } else if let SctpChunkOption::Ipv4Addr(o) = option {
+                panic!("{:?}", o);
+            } else if let SctpChunkOption::Generic(o) = option {
+                panic!("{:?}", o);
+            // }
+            // let option_state_cookie = if let SctpChunkOption::StateCookie(o) = option {
+            //     o
+            } else {
+                panic!("Not a \"State Cookie\" option");
+            };
+            assert!(option_state_cookie.get_length() == 2 + 2 + 6);
+            assert!(option_state_cookie.payload() == b"c00ki3".to_vec());
+        } else {
+            panic!("Unexpected additional option");
+        }
+    }
+    let options = chunk_init_ack.get_options();
     assert!(options.len() == 2);
     /* check IPv4 Option */
     let option_ipv4 = if let SctpChunkOption::Ipv4Addr(o) = &options[0] {
@@ -516,11 +655,132 @@ fn sctp_chunk_init_ack() {
 #[test]
 fn sctp_packet_iter() {
     let data: &[u8] = b"\x0b\x59\x0b\x59\x00\x00\x0e\x50\x53\xc3\x05\x5f\x04\x00\x00\x18\x00\x01\x00\x14\x40\xe4\x4b\x92\x0a\x1c\x06\x2c\x1b\x66\xaf\x7e\x00\x00\x00\x00";
-
     let pkt = SctpPacket::new(&data).unwrap();
     let chunks: Vec<_> = pkt.iter_chunks().collect();
     assert_eq!(chunks.len(), 1);
     let chunk0 = &chunks[0];
     assert_eq!(chunk0.get_type_(), SctpChunkTypes::HEARTBEAT);
     assert_eq!(chunk0.get_payload().len(), 20);
+}
+
+#[test]
+fn sctp_packet_option_iter() {
+    /*
+     * >>> p = SCTPChunkInit(params=[SCTPChunkParamIPv4Addr(), SCTPChunkParamIPv6Addr(), SCTPChunkParamStateCookie(), SCTPChunkParamUnrocognizedP
+     * ...:aram(), SCTPChunkParamCookiePreservative(), SCTPChunkParamHostname(), SCTPChunkParamSupportedAddrTypes()])
+     * >>> p.show2()
+     * ###[ SCTPChunkInit ]###
+     *   type= init
+     *   flags= 0x0
+     *   len= 76
+     *   init_tag= 0x0
+     *   a_rwnd= 0
+     *   n_out_streams= 0
+     *   n_in_streams= 0
+     *   init_tsn= 0x0
+     *   \params\
+     *    |###[ SCTPChunkParamIPv4Addr ]###
+     *    |  type= IPv4
+     *    |  len= 8
+     *    |  addr= 127.0.0.1
+     *    |###[ SCTPChunkParamIPv6Addr ]###
+     *    |  type= IPv6
+     *    |  len= 20
+     *    |  addr= ::1
+     *    |###[ SCTPChunkParamStateCookie ]###
+     *    |  type= state-cookie
+     *    |  len= 4
+     *    |  cookie= ''
+     *    |###[ SCTPChunkParamUnrocognizedParam ]###
+     *    |  type= unrecognized-param
+     *    |  len= 4
+     *    |  param= ''
+     *    |###[ SCTPChunkParamCookiePreservative ]###
+     *    |  type= cookie-preservative
+     *    |  len= 8
+     *    |  sug_cookie_inc= 0x0
+     *    |###[ SCTPChunkParamHostname ]###
+     *    |  type= hostname
+     *    |  len= 4
+     *    |  hostname= ''
+     *    |###[ SCTPChunkParamSupportedAddrTypes ]###
+     *    |  type= addrtypes
+     *    |  len= 6
+     *    |  addr_type_list= [IPv4]
+     *
+     * >>> raw(p)
+     * b'\x01\x00\x00L\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\x00\x08\x7f\x00\x00\x01\x00\x06\x00\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x07\x00\x04\x00\x08\x00\x04\x00\t\x00\x08\x00\x00\x00\x00\x00\x0b\x00\x04\x00\x0c\x00\x06\x00\x05\x00\x00'
+     */
+    let data: &[u8] = b"\x01\x00\x00L\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x05\x00\x08\x7f\x00\x00\x01\x00\x06\x00\x14\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\x07\x00\x04\x00\x08\x00\x04\x00\t\x00\x08\x00\x00\x00\x00\x00\x0b\x00\x04\x00\x0c\x00\x06\x00\x05\x00\x00";
+    let chunk = SctpChunk::new(&data).unwrap();
+    let mut iter = chunk.iter_options();
+    /* option ipv4 */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::IPV4_ADDR);
+    let option_ipv4 = if let SctpChunkOption::Ipv4Addr(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_ipv4.get_length() == 2 + 2 + 4);
+    assert!(option_ipv4.get_addr() == Ipv4Addr::new(127, 0, 0, 1));
+    /* option ipv6 */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::IPV6_ADDR);
+    let option_ipv6 = if let SctpChunkOption::Ipv6Addr(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_ipv6.get_length() == 2 + 2 + 16);
+    assert!(option_ipv6.get_addr() == Ipv6Addr::new(0, 0, 0, 0, 0, 0, 0, 1));
+    /* option state-cookie */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::STATE_COOKIE);
+    let option_statecookie = if let SctpChunkOption::StateCookie(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_statecookie.get_length() == 2 + 2);
+    assert!(option_statecookie.payload() == b"".to_vec());
+    /* option unrecognized parameter */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::UNRECOGNIZED_PARAMETER);
+    let option_unrec = if let SctpChunkOption::Generic(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_unrec.get_length() == 2 + 2);
+    assert!(option_unrec.payload() == b"".to_vec());
+    /* option cookie preservative */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::COOKIE_PRESERVATIVE);
+    let option_unrec = if let SctpChunkOption::Generic(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_unrec.get_length() == 2 + 2 + 4);
+    assert!(option_unrec.payload() == b"\x00\x00\x00\x00".to_vec());
+    /* option hostname */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::HOSTNAME_ADDR);
+    let option_unrec = if let SctpChunkOption::Generic(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    assert!(option_unrec.get_length() == 2 + 2);
+    assert!(option_unrec.payload() == b"".to_vec());
+    /* option supported addr types */
+    let option = iter.next().unwrap();
+    assert!(option.get_type_() == SctpChunkOptionTypes::SUPPORTED_ADDR_TYPES);
+    let option_unrec = if let SctpChunkOption::Generic(x) = option {
+        x
+    } else {
+        panic!("Unexpected chunk type");
+    };
+    // XXX TODO
 }
